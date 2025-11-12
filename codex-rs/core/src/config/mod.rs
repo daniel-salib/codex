@@ -279,6 +279,75 @@ pub struct Config {
     pub otel: crate::config::types::OtelConfig,
 }
 
+/// Apply environment variable overrides to a model provider configuration.
+///
+/// This function checks for provider-specific environment variables that can
+/// override the base_url and wire_api settings at runtime without modifying
+/// config files. The environment variables follow this pattern:
+///
+/// - `CODEX_PROVIDER_<PROVIDER_ID>_BASE_URL` - Override the base URL
+/// - `CODEX_PROVIDER_<PROVIDER_ID>_WIRE_API` - Override the wire API ("chat" or "responses")
+///
+/// Where `<PROVIDER_ID>` is the uppercased provider ID with hyphens converted to underscores.
+/// For example, for provider "vllm-local":
+/// - `CODEX_PROVIDER_VLLM_LOCAL_BASE_URL`
+/// - `CODEX_PROVIDER_VLLM_LOCAL_WIRE_API`
+fn apply_provider_env_overrides(provider: &mut ModelProviderInfo, provider_id: &str) {
+    use crate::model_provider_info::WireApi;
+
+    // Convert provider ID to environment variable suffix
+    // e.g., "vllm-local" -> "VLLM_LOCAL"
+    let provider_suffix = provider_id.to_uppercase().replace('-', "_");
+
+    // Check for base URL override
+    let base_url_env = format!("CODEX_PROVIDER_{}_BASE_URL", provider_suffix);
+    if let Ok(base_url) = std::env::var(&base_url_env) {
+        let trimmed = base_url.trim();
+        if !trimmed.is_empty() {
+            tracing::info!(
+                "Overriding provider '{}' base_url from environment variable {}: {}",
+                provider_id,
+                base_url_env,
+                trimmed
+            );
+            provider.base_url = Some(trimmed.to_string());
+        }
+    }
+
+    // Check for wire API override
+    let wire_api_env = format!("CODEX_PROVIDER_{}_WIRE_API", provider_suffix);
+    if let Ok(wire_api_str) = std::env::var(&wire_api_env) {
+        let trimmed = wire_api_str.trim().to_lowercase();
+        if !trimmed.is_empty() {
+            match trimmed.as_str() {
+                "responses" => {
+                    tracing::info!(
+                        "Overriding provider '{}' wire_api from environment variable {}: responses",
+                        provider_id,
+                        wire_api_env
+                    );
+                    provider.wire_api = WireApi::Responses;
+                }
+                "chat" => {
+                    tracing::info!(
+                        "Overriding provider '{}' wire_api from environment variable {}: chat",
+                        provider_id,
+                        wire_api_env
+                    );
+                    provider.wire_api = WireApi::Chat;
+                }
+                _ => {
+                    tracing::warn!(
+                        "Invalid value for {}: '{}' (expected 'chat' or 'responses')",
+                        wire_api_env,
+                        trimmed
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl Config {
     pub async fn load_with_cli_overrides(
         cli_overrides: Vec<(String, TomlValue)>,
@@ -1070,7 +1139,7 @@ impl Config {
             .or(config_profile.model_provider)
             .or(cfg.model_provider)
             .unwrap_or_else(|| "openai".to_string());
-        let model_provider = model_providers
+        let mut model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
                 std::io::Error::new(
@@ -1079,6 +1148,10 @@ impl Config {
                 )
             })?
             .clone();
+
+        // Apply environment variable overrides for provider configuration
+        // This allows runtime override of base_url and wire_api without modifying config files
+        apply_provider_env_overrides(&mut model_provider, &model_provider_id);
 
         let shell_environment_policy = cfg.shell_environment_policy.into();
 
